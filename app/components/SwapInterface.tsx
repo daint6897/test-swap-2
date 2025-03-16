@@ -1,14 +1,13 @@
 "use client";
 import React, { useState, useEffect, useRef } from "react";
 import {
-  useWallets,
   ConnectButton,
   useCurrentAccount,
   useSuiClientQuery,
   useSignAndExecuteTransaction,
 } from "@mysten/dapp-kit";
 import { formatAddress } from "@mysten/sui/utils";
-import { createSwapTransaction } from "../services/aftermath";
+import { createSwapTransaction, TradeRoute, TradeRouteOther } from "../services/aftermath";
 
 import { useTradeRoute } from "../hooks/useTradeRoute";
 import { convertToBigInt } from "../helper/convertToBigInt";
@@ -21,21 +20,27 @@ import { getAmountCoinByRate } from "../helper/getAmountCoinByRate";
 import { formatCurrencyToNumber } from "../helper/formatCurrencyToNumber";
 import { isValInputOnlyNumber } from "../helper/isValInputOnlyNumber";
 import { InputAmount } from "./InputAmount";
+import useToast from "../hooks/useToast";
+import ListRouter from "./ListRouter";
 
 export default function SwapInterface() {
+  const { showSuccessToast } = useToast({
+    duration: 5000,
+    position: "top-right",
+  });
   const [inputAmount, setInputAmount] = useState("");
   const [outputAmount, setOutputAmount] = useState("");
+  const [routeSelected, setRouteSelected] = useState<any>(undefined);
   const [fromToken, setFromToken] = useState(TOKENS.SUI);
   const [toToken, setToToken] = useState(TOKENS.CETUS);
+  const [idRouteSelected, setIdRouteSelected] = useState("");
 
   const isChangingInput = useRef(false);
 
-  const wallets = useWallets();
   const account = useCurrentAccount();
 
   const [isSwapping, setIsSwapping] = useState(false);
   const [slippage, setSlippage] = useState("1");
-  const [transactionDigest, setTransactionDigest] = useState<string>("");
   const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
 
   const { data: priceInfo, isFetching: isLoadingRate } = useExchangeRate({
@@ -51,7 +56,7 @@ export default function SwapInterface() {
     },
     {
       enabled: !!account?.address,
-      refetchInterval: 5000,
+      refetchInterval: 3000,
     }
   );
 
@@ -59,13 +64,21 @@ export default function SwapInterface() {
     "getBalance",
     {
       owner: account?.address || "",
-      coinType: fromToken.coinType,
+      coinType: toToken.coinType,
     },
     {
       enabled: !!account?.address,
-      refetchInterval: 5000,
+      refetchInterval: 3000,
     }
   );
+
+  const onSelectRoute = (
+    route: TradeRoute | undefined | TradeRouteOther["tradeMetadata"],
+    idRouteSelected: string
+  ) => {
+    setIdRouteSelected(idRouteSelected);
+    setRouteSelected(route);
+  };
 
   const handleInputChange = (value: string) => {
     isChangingInput.current = true;
@@ -85,15 +98,15 @@ export default function SwapInterface() {
 
   const onChangeSlippage = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
-    if(value === ""){
+    if (value === "") {
       setSlippage("0");
-      return
+      return;
     }
     if (isValInputOnlyNumber(value)) return;
-    
-    if(value.match(/^\d*\.$/)){
+
+    if (value.match(/^\d*\.$/)) {
       setSlippage(value);
-      return
+      return;
     }
     const numValue = parseFloat(value);
     if (numValue > 100) {
@@ -181,7 +194,7 @@ export default function SwapInterface() {
 
     setIsSwapping(true);
     try {
-      const routers = {
+      let routers = {
         completeRoute: {
           routes: routeData?.routes,
           coinIn: routeData?.coinIn,
@@ -190,12 +203,23 @@ export default function SwapInterface() {
           netTradeFeePercentage: routeData?.netTradeFeePercentage,
         },
         isSponsoredTx: false,
-      };
+      } as any;
+      if(idRouteSelected !== "Aftermath"){
+        routers = {
+          routers : routeSelected?.routes,
+          byAmountIn: true,
+          coinInAmount: routeSelected?.amountIn,
+          coinInType: fromToken.coinType,
+          isMergeTragetCoin: true,
+          refreshAllCoins: true,
+        };
+      }
 
       const swapRes = await createSwapTransaction(
         routers,
         account.address,
-        parseFloat(slippage) / 100
+        parseFloat(slippage) / 100,
+        idRouteSelected
       );
       signAndExecuteTransaction(
         {
@@ -205,6 +229,9 @@ export default function SwapInterface() {
         {
           onSuccess: (result) => {
             console.log("executed transaction", result);
+            showSuccessToast("Swap successfully");
+            setInputAmount("");
+            setOutputAmount("");
           },
         }
       );
@@ -234,7 +261,6 @@ export default function SwapInterface() {
             </div>
           ) : null}
         </div>
-
 
         {/* Input Token */}
         <div className="bg-gray-50 p-4 rounded-xl mb-2">
@@ -299,12 +325,7 @@ export default function SwapInterface() {
           <div className="flex justify-between mb-2">
             <p className="text-gray-500">You receive</p>
             <p className="text-gray-500">
-              Balance:{" "}
-              {formatBigintToNumber(
-                toTokenBalance?.totalBalance,
-                toToken.roundNumber
-              )}{" "}
-              {toToken.symbol}
+              Balance: {balanceToToken} {toToken.symbol}
             </p>
             <SelectPercentAmount
               onChangePercentAmount={(percentAmount) => {
@@ -315,13 +336,6 @@ export default function SwapInterface() {
             />
           </div>
           <div className="flex justify-between">
-            {/* <input
-              type="text"
-              value={outputAmount}
-              onChange={(e) => handleOutputChange(e.target.value)}
-              placeholder="0.0"
-              className="bg-transparent text-2xl outline-none w-[60%]"
-            /> */}
             <InputAmount
               value={outputAmount}
               onChange={(val) => handleOutputChange(val)}
@@ -414,6 +428,19 @@ export default function SwapInterface() {
         ) : (
           <ConnectButton className="w-full !bg-blue-600 !hover:bg-blue-700 !text-white rounded-xl py-3 font-semibold" />
         )}
+        {routeData?.routes ? (
+          <ListRouter
+            routes={routeData}
+            onSelectRoute={onSelectRoute}
+            coinNameIn={toToken.name}
+            priceCoinOut={priceInfo?.priceData[toToken.coinType]?.price}
+            amountCoinParams={amountCoinParams}
+            fromTokenCoinType={fromToken.coinType}
+            toTokenCoinType={toToken.coinType}
+            slippage={slippage}
+            idRouteSelected={idRouteSelected}
+          />
+        ) : null}
       </div>
     </div>
   );
